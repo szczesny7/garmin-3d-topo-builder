@@ -16,8 +16,8 @@ china-maps/
 ├── data/
 │   ├── dem_1inch/          # SRTM 1" .hgt tiles (downloaded once, reused)
 │   └── osm/               # yunnan-latest.osm.pbf (refreshed each run)
-├── work/                   # Splitter temp output (cleaned each run)
-└── output/                 # Final gmapsupp.img + .gmapi
+├── work/                   # Build temp (splitter + mkgmap intermediate files)
+└── output/                 # Final gmapsupp.img + .gmapi only
 ```
 
 ## Quick Reference
@@ -34,8 +34,8 @@ china-maps/
 
 1. **Tooling** — checks for `java`, auto-downloads latest mkgmap + splitter .zip distributions from mkgmap.org.uk into `bin/`
 2. **Data** — `wget` Yunnan OSM from Geofabrik (always refreshed); triggers `download_1inch_dem.py` only if no `.hgt` files present (creates venv automatically)
-3. **Build** — cleans `work/`, runs splitter (max-nodes=1200000), then mkgmap with 30m DEM and routing enabled
-4. **Output** — `gmapsupp.img` for Garmin devices, `.gmapi` for BaseCamp
+3. **Build** — cleans `work/`, runs splitter (max-nodes=1200000), then mkgmap with 30m DEM and routing enabled; intermediate files stay in `work/mkgmap/`
+4. **Output** — copies only `gmapsupp.img` and `.gmapi` to `output/`; mkgmap's `.gmap` dir is renamed to `.gmapi` for BaseCamp compatibility
 
 ## Configuration
 
@@ -66,3 +66,4 @@ Yunnan bounding box for DEM is set in `download_1inch_dem.py` as `DEFAULT_BBOX =
 - **DEM tiles are downloaded as .hgt.zip and extracted** — mkgmap needs raw `.hgt` files in the DEM directory
 - **OSM data is always re-downloaded** to get the latest edits; DEM tiles are static (SRTM from 2000) and only downloaded once
 - **earthaccess search returns neighboring tiles** beyond the exact bbox — this is fine, more DEM coverage is better for mkgmap
+- **mkgmap `--gmapi` produces a `.gmap` directory**, not `.gmapi` — the script renames it so macOS BaseCamp recognizes it

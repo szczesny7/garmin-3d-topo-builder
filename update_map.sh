@@ -145,12 +145,13 @@ java "-Xmx${JAVA_HEAP}" -jar "$SPLITTER_JAR" \
 # Verify splitter produced template.args
 [ -f work/template.args ] || error "Splitter did not produce work/template.args"
 
-# Run mkgmap
+# Run mkgmap (into work/mkgmap/, then extract final files to output/)
 log "Running mkgmap with 1\" DEM ..."
-mkdir -p output
+rm -rf work/mkgmap
+mkdir -p work/mkgmap
 
 java "-Xmx${JAVA_HEAP}" -jar "$MKGMAP_JAR" \
-    --output-dir=output \
+    --output-dir=work/mkgmap \
     --gmapi \
     --gmapsupp \
     --route \
@@ -164,12 +165,18 @@ java "-Xmx${JAVA_HEAP}" -jar "$MKGMAP_JAR" \
     --description="Yunnan 30m DEM $(date +%Y-%m-%d)" \
     -c work/template.args
 
+# Collect final output files
+rm -rf output
+mkdir -p output
+mv work/mkgmap/gmapsupp.img output/
+mv "work/mkgmap/${FAMILY_NAME}.gmap" "output/${FAMILY_NAME}.gmapi"
+
 # ─── Phase 4: Done ──────────────────────────────────────────────────────────
 log "Build complete!"
 echo ""
 echo "Output files:"
-ls -lh output/gmapsupp.img 2>/dev/null && true
-ls -d output/*.gmapi 2>/dev/null && true
+ls -lh output/gmapsupp.img
+ls -dh output/*.gmapi
 echo ""
 echo "  gmapsupp.img  → Copy to Garmin device SD card under /Garmin/"
 echo "  *.gmapi       → Open with Garmin BaseCamp on macOS"
