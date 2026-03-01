@@ -16,6 +16,8 @@ SPLITTER_MAX_NODES="1200000"
 FAMILY_ID="9002"
 SERIES_NAME="OSM_Yunnan_1inch"
 FAMILY_NAME="OSM_Yunnan_3D"
+CONTOUR_STEP="20"
+CONTOUR_LINE_CAT="400,100"
 
 # ─── Helper functions ────────────────────────────────────────────────────────
 log()   { echo "==> $*"; }
@@ -114,21 +116,50 @@ log "Downloading OSM extract: yunnan-latest.osm.pbf"
 mkdir -p data/osm
 wget -q --show-progress -O "$OSM_FILE" "$OSM_URL"
 
+# Python venv (needed for DEM download and contour generation)
+if [ ! -f ".venv/bin/python" ]; then
+    log "Creating Python virtual environment"
+    python3 -m venv .venv
+    .venv/bin/pip install -q -r requirements.txt
+fi
+
 # DEM data — only if folder is empty
 if [ -z "$(ls data/dem_1inch/*.hgt 2>/dev/null)" ]; then
     log "DEM tiles not found — running download_1inch_dem.py"
-    if [ ! -f ".venv/bin/python" ]; then
-        log "Creating Python virtual environment"
-        python3 -m venv .venv
-        .venv/bin/pip install -q -r requirements.txt
-    fi
     .venv/bin/python download_1inch_dem.py
 else
     log "DEM tiles already present in data/dem_1inch/ — skipping download"
 fi
 
-# ─── Phase 3: Build Pipeline ────────────────────────────────────────────────
-log "Phase 3: Building map"
+# ─── Phase 3: Contour Generation ───────────────────────────────────────────
+log "Phase 3: Generating contour lines from DEM"
+mkdir -p work
+
+CONTOUR_PBF="data/contours.osm.pbf"
+if [ ! -f "$CONTOUR_PBF" ]; then
+    .venv/bin/pyhgtmap \
+        --pbf \
+        --step="$CONTOUR_STEP" \
+        --line-cat="$CONTOUR_LINE_CAT" \
+        --no-zero-contour \
+        --void-range-max=-500 \
+        --max-nodes-per-tile=0 \
+        --max-nodes-per-way=0 \
+        --simplifyContoursEpsilon=0.00001 \
+        --output-prefix=data/contours \
+        data/dem_1inch/*.hgt
+
+    # pyhgtmap names the file with geographic coords — rename to a stable name
+    GENERATED=$(ls data/contours*.osm.pbf 2>/dev/null | head -1)
+    [ -n "$GENERATED" ] || error "pyhgtmap did not produce a contour PBF"
+    mv "$GENERATED" "$CONTOUR_PBF"
+    log "Contour lines generated: $(du -h "$CONTOUR_PBF" | cut -f1)"
+else
+    log "Contour PBF already present — skipping generation"
+fi
+
+# ─── Phase 4: Build Pipeline ────────────────────────────────────────────────
+log "Phase 4: Building map"
 
 # Clean workspace
 log "Cleaning work/ directory"
@@ -163,7 +194,8 @@ java "-Xmx${JAVA_HEAP}" -jar "$MKGMAP_JAR" \
     --series-name="$SERIES_NAME" \
     --family-name="$FAMILY_NAME" \
     --description="Yunnan 30m DEM $(date +%Y-%m-%d)" \
-    -c work/template.args
+    -c work/template.args \
+    "$CONTOUR_PBF"
 
 # Collect final output files
 rm -rf output
@@ -171,7 +203,7 @@ mkdir -p output
 mv work/mkgmap/gmapsupp.img output/
 mv "work/mkgmap/${FAMILY_NAME}.gmap" "output/${FAMILY_NAME}.gmapi"
 
-# ─── Phase 4: Done ──────────────────────────────────────────────────────────
+# ─── Phase 5: Done ──────────────────────────────────────────────────────────
 log "Build complete!"
 echo ""
 echo "Output files:"
