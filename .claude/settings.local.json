@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python3:*)",
+      "WebSearch",
+      "WebFetch(domain:www.earthdata.nasa.gov)",
+      "WebFetch(domain:data.lpdaac.earthdatacloud.nasa.gov)",
+      "WebFetch(domain:nasa.github.io)",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__query-docs",
+      "Bash(source:*)"
+    ]
+  }
+}

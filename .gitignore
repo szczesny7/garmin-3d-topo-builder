@@ -1,0 +1,20 @@
+# Downloaded tools
+bin/mkgmap/
+bin/splitter/
+
+# Data files (large, downloaded on demand)
+data/dem_1inch/
+data/osm/*.pbf
+
+# Build artifacts
+work/
+output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Credentials
+.env
+.netrc
