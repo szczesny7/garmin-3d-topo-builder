@@ -11,13 +11,14 @@ OSM_FILE="data/osm/yunnan-latest.osm.pbf"
 MKGMAP_URL="https://www.mkgmap.org.uk/download/mkgmap.html"
 SPLITTER_URL="https://www.mkgmap.org.uk/download/splitter.html"
 
-JAVA_HEAP="4G"
+JAVA_HEAP="8G"
+PARALLEL_JOBS="$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 SPLITTER_MAX_NODES="1200000"
 FAMILY_ID="9002"
 SERIES_NAME="OSM_Yunnan_1inch"
 FAMILY_NAME="OSM_Yunnan_3D"
-CONTOUR_STEP="20"
-CONTOUR_LINE_CAT="400,100"
+CONTOUR_STEP="50"
+CONTOUR_LINE_CAT="500,250"
 
 # ─── Helper functions ────────────────────────────────────────────────────────
 log()   { echo "==> $*"; }
@@ -135,27 +136,27 @@ fi
 log "Phase 3: Generating contour lines from DEM"
 mkdir -p work
 
-CONTOUR_PBF="data/contours.osm.pbf"
-if [ ! -f "$CONTOUR_PBF" ]; then
+CONTOUR_DIR="data/contours"
+HGT_DIR="data/dem_1inch"
+if [ -z "$(ls "$CONTOUR_DIR"/*.osm.pbf 2>/dev/null)" ]; then
+    mkdir -p "$CONTOUR_DIR"
+    log "Generating contours ..."
     .venv/bin/pyhgtmap \
         --pbf \
         --step="$CONTOUR_STEP" \
         --line-cat="$CONTOUR_LINE_CAT" \
         --no-zero-contour \
         --void-range-max=-500 \
-        --max-nodes-per-tile=0 \
+        --max-nodes-per-tile=1000000 \
         --max-nodes-per-way=0 \
         --simplifyContoursEpsilon=0.00001 \
-        --output-prefix=data/contours \
-        data/dem_1inch/*.hgt
-
-    # pyhgtmap names the file with geographic coords — rename to a stable name
-    GENERATED=$(ls data/contours*.osm.pbf 2>/dev/null | head -1)
-    [ -n "$GENERATED" ] || error "pyhgtmap did not produce a contour PBF"
-    mv "$GENERATED" "$CONTOUR_PBF"
-    log "Contour lines generated: $(du -h "$CONTOUR_PBF" | cut -f1)"
+        --output-prefix="$CONTOUR_DIR"/contours \
+        "$HGT_DIR"/*.hgt
+    CONTOUR_COUNT=$(ls "$CONTOUR_DIR"/*.osm.pbf 2>/dev/null | wc -l | tr -d ' ')
+    [ "$CONTOUR_COUNT" -gt 0 ] || error "pyhgtmap did not produce any contour PBFs"
+    log "Contour lines generated: $CONTOUR_COUNT files"
 else
-    log "Contour PBF already present — skipping generation"
+    log "Contour PBFs already present in $CONTOUR_DIR/ — skipping generation"
 fi
 
 # ─── Phase 4: Build Pipeline ────────────────────────────────────────────────
@@ -171,6 +172,7 @@ log "Running splitter (max-nodes=$SPLITTER_MAX_NODES) ..."
 java "-Xmx${JAVA_HEAP}" -jar "$SPLITTER_JAR" \
     --output-dir=work \
     --max-nodes="$SPLITTER_MAX_NODES" \
+    --max-threads="$PARALLEL_JOBS" \
     "$OSM_FILE"
 
 # Verify splitter produced template.args
@@ -183,6 +185,7 @@ mkdir -p work/mkgmap
 
 java "-Xmx${JAVA_HEAP}" -jar "$MKGMAP_JAR" \
     --output-dir=work/mkgmap \
+    --max-jobs="$PARALLEL_JOBS" \
     --gmapi \
     --gmapsupp \
     --route \
@@ -195,7 +198,7 @@ java "-Xmx${JAVA_HEAP}" -jar "$MKGMAP_JAR" \
     --family-name="$FAMILY_NAME" \
     --description="Yunnan 30m DEM $(date +%Y-%m-%d)" \
     -c work/template.args \
-    "$CONTOUR_PBF"
+    "$CONTOUR_DIR"/*.osm.pbf
 
 # Collect final output files
 rm -rf output
