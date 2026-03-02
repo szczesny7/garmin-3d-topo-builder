@@ -4,24 +4,49 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ─── Configuration ───────────────────────────────────────────────────────────
-OSM_URL="https://download.geofabrik.de/asia/china/yunnan-latest.osm.pbf"
-OSM_FILE="data/osm/yunnan-latest.osm.pbf"
+# ─── Profile Loading ─────────────────────────────────────────────────────────
+PROFILE="${1:-}"
+if [ -z "$PROFILE" ] || [ ! -f "$PROFILE" ]; then
+    echo "Usage: $0 <profile.conf>"
+    echo "  e.g. $0 profiles/Asia/China/Yunnan.conf"
+    exit 1
+fi
 
+# shellcheck source=/dev/null
+source "$PROFILE"
+
+# Allow environment variable overrides for contour settings
+[ -n "${CONTOUR_STEP_OVERRIDE:-}" ] && CONTOUR_STEP="$CONTOUR_STEP_OVERRIDE"
+[ -n "${CONTOUR_LINE_CAT_OVERRIDE:-}" ] && CONTOUR_LINE_CAT="$CONTOUR_LINE_CAT_OVERRIDE"
+
+# Validate required profile variables
+for var in REGION_NAME OSM_URL FAMILY_ID CONTOUR_STEP CONTOUR_LINE_CAT; do
+    if [ -z "${!var:-}" ]; then
+        echo "ERROR: Profile is missing required variable: $var" >&2
+        exit 1
+    fi
+done
+
+# Auto-derive optional Garmin metadata from REGION_NAME if not set in profile
+: "${SERIES_NAME:=OSM_${REGION_NAME}_1inch}"
+: "${FAMILY_NAME:=OSM_${REGION_NAME}_3D}"
+
+# ─── Derived Paths ───────────────────────────────────────────────────────────
+DATA_DIR="data/${REGION_NAME}"
+WORK_DIR="work/${REGION_NAME}"
+OUT_DIR="output/${REGION_NAME}"
+OSM_FILE="${DATA_DIR}/osm/${REGION_NAME}-latest.osm.pbf"
+
+# ─── Configuration ───────────────────────────────────────────────────────────
 MKGMAP_URL="https://www.mkgmap.org.uk/download/mkgmap.html"
 SPLITTER_URL="https://www.mkgmap.org.uk/download/splitter.html"
 
 JAVA_HEAP="8G"
 PARALLEL_JOBS="$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 SPLITTER_MAX_NODES="1200000"
-FAMILY_ID="9002"
-SERIES_NAME="OSM_Yunnan_1inch"
-FAMILY_NAME="OSM_Yunnan_3D"
-CONTOUR_STEP="50"
-CONTOUR_LINE_CAT="500,250"
 
 # ─── Helper functions ────────────────────────────────────────────────────────
-log()   { echo "==> $*"; }
+log()   { echo "==> [$REGION_NAME] $*"; }
 error() { echo "ERROR: $*" >&2; exit 1; }
 
 check_java() {
@@ -29,6 +54,12 @@ check_java() {
         error "Java is required but not found. Install a JDK (e.g., openjdk 11+)."
     fi
     log "Java found: $(java -version 2>&1 | head -1)"
+}
+
+check_osmium() {
+    if ! command -v osmium &>/dev/null; then
+        error "osmium-tool is required but not found. Install it (e.g., brew install osmium-tool)."
+    fi
 }
 
 # Extract latest version string (e.g. "r4924") from a mkgmap.org.uk download page
@@ -100,6 +131,7 @@ download_splitter() {
 # ─── Phase 1: Tooling & Setup ───────────────────────────────────────────────
 log "Phase 1: Checking tools"
 check_java
+check_osmium
 download_mkgmap
 download_splitter
 
@@ -112,10 +144,21 @@ SPLITTER_JAR="bin/splitter/splitter.jar"
 # ─── Phase 2: Data Acquisition ──────────────────────────────────────────────
 log "Phase 2: Acquiring data"
 
+# Create region-specific directories
+mkdir -p "${DATA_DIR}/osm" "${DATA_DIR}/dem_1inch" "${DATA_DIR}/contours"
+mkdir -p "$WORK_DIR"
+mkdir -p "$OUT_DIR"
+
 # OSM data — always fetch latest
-log "Downloading OSM extract: yunnan-latest.osm.pbf"
-mkdir -p data/osm
+log "Downloading OSM extract: ${REGION_NAME}-latest.osm.pbf"
 wget -q --show-progress -O "$OSM_FILE" "$OSM_URL"
+
+# Extract bounding box from OSM PBF header
+log "Extracting bounding box from OSM PBF header..."
+BBOX_RAW=$(osmium fileinfo -g header.boxes "$OSM_FILE")
+# Strip parentheses and replace commas with spaces to get W S E N
+BBOX=$(echo "$BBOX_RAW" | tr -d '()' | tr ',' ' ')
+log "Detected BBOX: $BBOX"
 
 # Python venv (needed for DEM download and contour generation)
 if [ ! -f ".venv/bin/python" ]; then
@@ -125,19 +168,19 @@ if [ ! -f ".venv/bin/python" ]; then
 fi
 
 # DEM data — only if folder is empty
-if [ -z "$(ls data/dem_1inch/*.hgt 2>/dev/null)" ]; then
+if [ -z "$(ls "${DATA_DIR}/dem_1inch"/*.hgt 2>/dev/null)" ]; then
     log "DEM tiles not found — running download_1inch_dem.py"
-    .venv/bin/python download_1inch_dem.py
+    # shellcheck disable=SC2086
+    .venv/bin/python download_1inch_dem.py --bbox $BBOX --output-dir "${DATA_DIR}/dem_1inch"
 else
-    log "DEM tiles already present in data/dem_1inch/ — skipping download"
+    log "DEM tiles already present in ${DATA_DIR}/dem_1inch/ — skipping download"
 fi
 
 # ─── Phase 3: Contour Generation ───────────────────────────────────────────
 log "Phase 3: Generating contour lines from DEM"
-mkdir -p work
 
-CONTOUR_DIR="data/contours"
-HGT_DIR="data/dem_1inch"
+CONTOUR_DIR="${DATA_DIR}/contours"
+HGT_DIR="${DATA_DIR}/dem_1inch"
 if [ -z "$(ls "$CONTOUR_DIR"/*.osm.pbf 2>/dev/null)" ]; then
     mkdir -p "$CONTOUR_DIR"
     log "Generating contours ..."
@@ -163,55 +206,56 @@ fi
 log "Phase 4: Building map"
 
 # Clean workspace
-log "Cleaning work/ directory"
-rm -rf work/*
-mkdir -p work
+log "Cleaning ${WORK_DIR}/"
+rm -rf "${WORK_DIR:?}"/*
+mkdir -p "$WORK_DIR"
 
 # Run splitter
 log "Running splitter (max-nodes=$SPLITTER_MAX_NODES) ..."
 java "-Xmx${JAVA_HEAP}" -jar "$SPLITTER_JAR" \
-    --output-dir=work \
+    --output-dir="$WORK_DIR" \
     --max-nodes="$SPLITTER_MAX_NODES" \
     --max-threads="$PARALLEL_JOBS" \
     "$OSM_FILE"
 
 # Verify splitter produced template.args
-[ -f work/template.args ] || error "Splitter did not produce work/template.args"
+[ -f "${WORK_DIR}/template.args" ] || error "Splitter did not produce ${WORK_DIR}/template.args"
 
-# Run mkgmap (into work/mkgmap/, then extract final files to output/)
+# Run mkgmap (into work subdir, then extract final files to output/)
 log "Running mkgmap with 1\" DEM ..."
-rm -rf work/mkgmap
-mkdir -p work/mkgmap
+MKGMAP_WORK="${WORK_DIR}/mkgmap"
+rm -rf "$MKGMAP_WORK"
+mkdir -p "$MKGMAP_WORK"
 
 java "-Xmx${JAVA_HEAP}" -jar "$MKGMAP_JAR" \
-    --output-dir=work/mkgmap \
+    --output-dir="$MKGMAP_WORK" \
     --max-jobs="$PARALLEL_JOBS" \
     --gmapi \
     --gmapsupp \
     --route \
     --index \
-    --dem="data/dem_1inch" \
+    --dem="$HGT_DIR" \
     --dem-dists=3312,13248,26512,53024 \
     --overview-dem-dist=88360 \
     --family-id="$FAMILY_ID" \
     --series-name="$SERIES_NAME" \
     --family-name="$FAMILY_NAME" \
-    --description="Yunnan 30m DEM $(date +%Y-%m-%d)" \
-    -c work/template.args \
+    --description="${REGION_NAME} 30m DEM $(date +%Y-%m-%d)" \
+    -c "${WORK_DIR}/template.args" \
     "$CONTOUR_DIR"/*.osm.pbf
 
 # Collect final output files
-rm -rf output
-mkdir -p output
-mv work/mkgmap/gmapsupp.img output/
-mv "work/mkgmap/${FAMILY_NAME}.gmap" "output/${FAMILY_NAME}.gmapi"
+rm -rf "${OUT_DIR:?}"/*
+mkdir -p "$OUT_DIR"
+mv "${MKGMAP_WORK}/gmapsupp.img" "$OUT_DIR/"
+mv "${MKGMAP_WORK}/${FAMILY_NAME}.gmap" "${OUT_DIR}/${FAMILY_NAME}.gmapi"
 
 # ─── Phase 5: Done ──────────────────────────────────────────────────────────
 log "Build complete!"
 echo ""
 echo "Output files:"
-ls -lh output/gmapsupp.img
-ls -dh output/*.gmapi
+ls -lh "${OUT_DIR}/gmapsupp.img"
+ls -dh "${OUT_DIR}"/*.gmapi
 echo ""
-echo "  gmapsupp.img  → Copy to Garmin device SD card under /Garmin/"
-echo "  *.gmapi       → Open with Garmin BaseCamp on macOS"
+echo "  gmapsupp.img  -> Copy to Garmin device SD card under /Garmin/"
+echo "  *.gmapi       -> Open with Garmin BaseCamp on macOS"

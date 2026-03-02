@@ -3,9 +3,9 @@ bin/mkgmap/
 bin/splitter/
 
 # Data files (large, downloaded/generated on demand)
-data/dem_1inch/
-data/osm/*.pbf
-data/contours/
+data/*/dem_1inch/
+data/*/osm/*.pbf
+data/*/contours/
 
 # Build artifacts
 work/
