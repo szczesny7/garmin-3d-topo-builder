@@ -25,7 +25,8 @@ jobs:
       - name: Check for changes
         id: diff
         run: |
-          if git diff --quiet profiles/; then
+          git add profiles/
+          if git diff --staged --quiet profiles/; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
