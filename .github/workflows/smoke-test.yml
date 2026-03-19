@@ -1,0 +1,50 @@
+name: Build smoke test
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Every Monday at 08:00 UTC (after profile update)
+  pull_request:
+    paths:
+      - "update_map.sh"
+      - "download_1inch_dem.py"
+      - "generate_profiles.py"
+      - "requirements.txt"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool wget unzip
+
+      - name: Create .env for Earthdata credentials
+        env:
+          EARTHDATA_USERNAME: ${{ secrets.EARTHDATA_USERNAME }}
+          EARTHDATA_PASSWORD: ${{ secrets.EARTHDATA_PASSWORD }}
+        run: |
+          echo "EARTHDATA_USERNAME=${EARTHDATA_USERNAME}" > .env
+          echo "EARTHDATA_PASSWORD=${EARTHDATA_PASSWORD}" >> .env
+
+      - name: Run full build (Monaco)
+        run: ./update_map.sh profiles/Europe/Monaco.conf
+
+      - name: Verify output files exist
+        run: |
+          test -f output/Monaco/gmapsupp.img
+          test -d output/Monaco/*.gmapi
+          echo "gmapsupp.img size: $(stat --format='%s' output/Monaco/gmapsupp.img) bytes"
