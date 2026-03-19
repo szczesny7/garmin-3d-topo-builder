@@ -5,6 +5,7 @@ Encodes the complete Geofabrik download server hierarchy and generates
 .conf files under profiles/ with deterministic FAMILY_IDs.
 """
 
+import hashlib
 import os
 import shutil
 import sys
@@ -218,6 +219,7 @@ CENTRAL_AMERICA = [
 
 EUROPE = [
     ("Albania", "albania"),
+    ("Alps", "alps"),
     ("Andorra", "andorra"),
     ("Austria", "austria"),
     ("Azores", "azores"),
@@ -532,29 +534,41 @@ SOUTH_AMERICA = [
 ]
 
 # ---------------------------------------------------------------------------
-# Continent definitions with FAMILY_ID base offsets
+# Continent definitions
 # ---------------------------------------------------------------------------
 
 CONTINENTS = [
-    {"name": "Africa", "slug": "africa", "base_id": 1000,
+    {"name": "Africa", "slug": "africa",
      "toplevel": False, "regions": AFRICA},
-    {"name": "Antarctica", "slug": "antarctica", "base_id": 2000,
+    {"name": "Antarctica", "slug": "antarctica",
      "toplevel": True, "regions": []},
-    {"name": "Asia", "slug": "asia", "base_id": 3000,
+    {"name": "Asia", "slug": "asia",
      "toplevel": False, "regions": ASIA},
-    {"name": "Australia-Oceania", "slug": "australia-oceania", "base_id": 4000,
+    {"name": "Australia-Oceania", "slug": "australia-oceania",
      "toplevel": False, "regions": AUSTRALIA_OCEANIA},
-    {"name": "Central America", "slug": "central-america", "base_id": 5000,
+    {"name": "Central America", "slug": "central-america",
      "toplevel": False, "regions": CENTRAL_AMERICA},
-    {"name": "Europe", "slug": "europe", "base_id": 6000,
+    {"name": "Europe", "slug": "europe",
      "toplevel": False, "regions": EUROPE},
-    {"name": "North America", "slug": "north-america", "base_id": 8000,
+    {"name": "North America", "slug": "north-america",
      "toplevel": False, "regions": NORTH_AMERICA},
-    {"name": "Russia", "slug": "russia", "base_id": 9000,
+    {"name": "Russia", "slug": "russia",
      "toplevel": True, "regions": RUSSIA},
-    {"name": "South America", "slug": "south-america", "base_id": 9100,
+    {"name": "South America", "slug": "south-america",
      "toplevel": False, "regions": SOUTH_AMERICA},
 ]
+
+
+def stable_family_id(url_path):
+    """Derive a stable FAMILY_ID from the URL path via hash.
+
+    Garmin FAMILY_ID is 16-bit (valid range 1-65535). We hash the URL path
+    and map into 1-65535. This is stable across additions/removals.
+    """
+    h = hashlib.sha256(url_path.encode()).digest()
+    # Use first 2 bytes for a 16-bit value, then map to 1-65535
+    raw = int.from_bytes(h[:2], "big")
+    return (raw % 65535) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -611,21 +625,18 @@ def main():
 
     for continent in CONTINENTS:
         profiles = collect_profiles(continent)
-        # Sort by url_path for deterministic FAMILY_ID assignment
-        profiles.sort(key=lambda p: p[1])
-        base_id = continent["base_id"]
 
-        for i, (rel_path, url_path, display_name) in enumerate(profiles):
-            family_id = base_id + i + 1
+        for rel_path, url_path, display_name in profiles:
+            family_id = stable_family_id(url_path)
 
-            # Verify no FAMILY_ID collision
-            if family_id in all_family_ids:
+            # Handle hash collisions by linear probing
+            while family_id in all_family_ids:
                 print(
-                    f"ERROR: FAMILY_ID {family_id} collision between "
-                    f"{rel_path} and {all_family_ids[family_id]}",
+                    f"WARNING: FAMILY_ID {family_id} collision between "
+                    f"{rel_path} and {all_family_ids[family_id]}, rehashing",
                     file=sys.stderr,
                 )
-                sys.exit(1)
+                family_id = (family_id % 65535) + 1
             all_family_ids[family_id] = rel_path
 
             osm_url = f"{BASE_URL}/{url_path}-latest.osm.pbf"
