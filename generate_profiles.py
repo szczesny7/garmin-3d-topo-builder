@@ -1,562 +1,167 @@
 #!/usr/bin/env python3
-"""Generate Garmin topo map profiles for all Geofabrik regions.
+"""Generate Garmin topo map profiles from the Geofabrik region index.
 
-Encodes the complete Geofabrik download server hierarchy and generates
-.conf files under profiles/ with deterministic FAMILY_IDs.
+Fetches the Geofabrik index-v1-nogeom.json, builds the region hierarchy,
+and generates .conf files under profiles/ with stable hash-based FAMILY_IDs.
 """
 
 import hashlib
+import json
 import os
 import shutil
 import sys
+import urllib.request
 
-BASE_URL = "https://download.geofabrik.de"
+GEOFABRIK_INDEX_URL = "https://download.geofabrik.de/index-v1-nogeom.json"
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
 CONTOUR_STEP = "50"
 CONTOUR_LINE_CAT = "500,250"
 
-# ---------------------------------------------------------------------------
-# Geofabrik hierarchy data
-# Each region: (display_name, slug) or (display_name, slug, [children])
-# ---------------------------------------------------------------------------
+# Continents to skip as profiles (too large to build, only their children matter)
+SKIP_CONTINENTS = {"africa", "asia", "australia-oceania", "central-america",
+                   "europe", "north-america", "south-america"}
 
-AFRICA = [
-    ("Algeria", "algeria"),
-    ("Angola", "angola"),
-    ("Benin", "benin"),
-    ("Botswana", "botswana"),
-    ("Burkina Faso", "burkina-faso"),
-    ("Burundi", "burundi"),
-    ("Cameroon", "cameroon"),
-    ("Canary Islands", "canary-islands"),
-    ("Cape Verde", "cape-verde"),
-    ("Central African Republic", "central-african-republic"),
-    ("Chad", "chad"),
-    ("Comores", "comores"),
-    ("Congo-Brazzaville", "congo-brazzaville"),
-    ("Congo-Democratic Republic", "congo-democratic-republic"),
-    ("Djibouti", "djibouti"),
-    ("Egypt", "egypt"),
-    ("Equatorial Guinea", "equatorial-guinea"),
-    ("Eritrea", "eritrea"),
-    ("Ethiopia", "ethiopia"),
-    ("Gabon", "gabon"),
-    ("Ghana", "ghana"),
-    ("Guinea", "guinea"),
-    ("Guinea-Bissau", "guinea-bissau"),
-    ("Ivory Coast", "ivory-coast"),
-    ("Kenya", "kenya"),
-    ("Lesotho", "lesotho"),
-    ("Liberia", "liberia"),
-    ("Libya", "libya"),
-    ("Madagascar", "madagascar"),
-    ("Malawi", "malawi"),
-    ("Mali", "mali"),
-    ("Mauritania", "mauritania"),
-    ("Mauritius", "mauritius"),
-    ("Morocco", "morocco"),
-    ("Mozambique", "mozambique"),
-    ("Namibia", "namibia"),
-    ("Niger", "niger"),
-    ("Nigeria", "nigeria"),
-    ("Rwanda", "rwanda"),
-    ("Saint Helena, Ascension, and Tristan da Cunha", "saint-helena-ascension-and-tristan-da-cunha"),
-    ("Sao Tome and Principe", "sao-tome-and-principe"),
-    ("Senegal and Gambia", "senegal-and-gambia"),
-    ("Seychelles", "seychelles"),
-    ("Sierra Leone", "sierra-leone"),
-    ("Somalia", "somalia"),
-    ("South Africa", "south-africa"),
-    ("South Sudan", "south-sudan"),
-    ("Sudan", "sudan"),
-    ("Swaziland", "swaziland"),
-    ("Tanzania", "tanzania"),
-    ("Togo", "togo"),
-    ("Tunisia", "tunisia"),
-    ("Uganda", "uganda"),
-    ("Zambia", "zambia"),
-    ("Zimbabwe", "zimbabwe"),
-]
+# Slug -> display name overrides for cases where titlecase isn't right.
+# Only needed when slug-to-titlecase produces a wrong or ambiguous name.
+DISPLAY_NAME_OVERRIDES = {
+    # Continents / top-level directory names
+    "australia-oceania": "Australia-Oceania",
+    "central-america": "Central America",
+    "north-america": "North America",
+    "south-america": "South America",
+    # Ambiguous names
+    "us": "United States",
+    "us/georgia": "Georgia (US State)",
+    # Compound regions where slug loses info
+    "haiti-and-domrep": "Haiti and Dominican Republic",
+    "guernsey-jersey": "Guernsey and Jersey",
+    "malaysia-singapore-brunei": "Malaysia, Singapore, and Brunei",
+    "ireland-and-northern-ireland": "Ireland and Northern Ireland",
+    "gcc-states": "GCC States",
+    "saint-helena-ascension-and-tristan-da-cunha": "Saint Helena, Ascension, and Tristan da Cunha",
+    "congo-brazzaville": "Congo-Brazzaville",
+    "congo-democratic-republic": "Congo-Democratic Republic",
+    "sao-tome-and-principe": "Sao Tome and Principe",
+    "senegal-and-gambia": "Senegal and Gambia",
+    "israel-and-palestine": "Israel and Palestine",
+    "bosnia-herzegovina": "Bosnia-Herzegovina",
+    "czech-republic": "Czech Republic",
+    "provence-alpes-cote-d-azur": "Provence Alpes-Cote-d'Azur",
+    "champagne-ardenne": "Champagne Ardenne",
+    "franche-comte": "Franche Comte",
+    "pays-de-la-loire": "Pays de la Loire",
+    "nord-pas-de-calais": "Nord-Pas-de-Calais",
+    "baden-wuerttemberg": "Baden-Wuerttemberg",
+    "mecklenburg-vorpommern": "Mecklenburg-Vorpommern",
+    "nordrhein-westfalen": "Nordrhein-Westfalen",
+    "rheinland-pfalz": "Rheinland-Pfalz",
+    "sachsen-anhalt": "Sachsen-Anhalt",
+    "schleswig-holstein": "Schleswig-Holstein",
+    "isle-of-man": "Isle of Man",
+    "united-kingdom": "United Kingdom",
+    "castilla-la-mancha": "Castilla-La Mancha",
+    "castilla-y-leon": "Castilla y Leon",
+    "islas-baleares": "Islas Baleares",
+    "la-rioja": "La Rioja",
+    "pais-vasco": "Pais Vasco",
+    "new-caledonia": "New Caledonia",
+    "new-zealand": "New Zealand",
+    "papua-new-guinea": "Papua New Guinea",
+    "pitcairn-islands": "Pitcairn Islands",
+    "polynesie-francaise": "Polynesie Francaise",
+    "solomon-islands": "Solomon Islands",
+    "wallis-et-futuna": "Wallis et Futuna",
+    "american-oceania": "American Oceania",
+    "cook-islands": "Cook Islands",
+    "ile-de-clipperton": "Ile de Clipperton",
+    "marshall-islands": "Marshall Islands",
+    "sierra-leone": "Sierra Leone",
+    "south-africa": "South Africa",
+    "south-sudan": "South Sudan",
+    "canary-islands": "Canary Islands",
+    "cape-verde": "Cape Verde",
+    "central-african-republic": "Central African Republic",
+    "equatorial-guinea": "Equatorial Guinea",
+    "guinea-bissau": "Guinea-Bissau",
+    "ivory-coast": "Ivory Coast",
+    "burkina-faso": "Burkina Faso",
+    "east-timor": "East Timor",
+    "north-korea": "North Korea",
+    "south-korea": "South Korea",
+    "sri-lanka": "Sri Lanka",
+    "inner-mongolia": "Inner Mongolia",
+    "hong-kong": "Hong Kong",
+    "faroe-islands": "Faroe Islands",
+    "ile-de-france": "Ile-de-France",
+    "languedoc-roussillon": "Languedoc-Roussillon",
+    "basse-normandie": "Basse-Normandie",
+    "haute-normandie": "Haute-Normandie",
+    "midi-pyrenees": "Midi-Pyrenees",
+    "poitou-charentes": "Poitou-Charentes",
+    "rhone-alpes": "Rhone-Alpes",
+    "nusa-tenggara": "Nusa-Tenggara",
+    "kujawsko-pomorskie": "Kujawsko-Pomorskie",
+    "warminsko-mazurskie": "Warminsko-Mazurskie",
+    "isle-of-wight": "Isle of Wight",
+    "east-sussex": "East Sussex",
+    "east-yorkshire-with-hull": "East Yorkshire with Hull",
+    "greater-london": "Greater London",
+    "greater-manchester": "Greater Manchester",
+    "north-yorkshire": "North Yorkshire",
+    "south-yorkshire": "South Yorkshire",
+    "tyne-and-wear": "Tyne and Wear",
+    "west-midlands": "West Midlands",
+    "west-sussex": "West Sussex",
+    "west-yorkshire": "West Yorkshire",
+    "el-salvador": "El Salvador",
+    "costa-rica": "Costa Rica",
+    "british-columbia": "British Columbia",
+    "new-brunswick": "New Brunswick",
+    "newfoundland-and-labrador": "Newfoundland and Labrador",
+    "northwest-territories": "Northwest Territories",
+    "nova-scotia": "Nova Scotia",
+    "prince-edward-island": "Prince Edward Island",
+    "district-of-columbia": "District of Columbia",
+    "new-hampshire": "New Hampshire",
+    "new-jersey": "New Jersey",
+    "new-mexico": "New Mexico",
+    "new-york": "New York",
+    "north-carolina": "North Carolina",
+    "north-dakota": "North Dakota",
+    "puerto-rico": "Puerto Rico",
+    "rhode-island": "Rhode Island",
+    "south-carolina": "South Carolina",
+    "south-dakota": "South Dakota",
+    "us-virgin-islands": "US Virgin Islands",
+    "west-virginia": "West Virginia",
+    "falklands": "Falkland Islands",
+    "centro-oeste": "Centro-Oeste",
+    "central-fed-district": "Central Federal District",
+    "crimean-fed-district": "Crimean Federal District",
+    "far-eastern-fed-district": "Far Eastern Federal District",
+    "north-caucasus-fed-district": "North Caucasus Federal District",
+    "northwestern-fed-district": "Northwestern Federal District",
+    "siberian-fed-district": "Siberian Federal District",
+    "south-fed-district": "South Federal District",
+    "ural-fed-district": "Ural Federal District",
+    "volga-fed-district": "Volga Federal District",
+    "nord-est": "Nord-Est",
+    "nord-ovest": "Nord-Ovest",
+    "noord-brabant": "Noord-Brabant",
+    "noord-holland": "Noord-Holland",
+    "zuid-holland": "Zuid-Holland",
+}
 
-ASIA = [
-    ("Afghanistan", "afghanistan"),
-    ("Armenia", "armenia"),
-    ("Azerbaijan", "azerbaijan"),
-    ("Bangladesh", "bangladesh"),
-    ("Bhutan", "bhutan"),
-    ("Cambodia", "cambodia"),
-    ("China", "china", [
-        ("Anhui", "anhui"),
-        ("Beijing", "beijing"),
-        ("Chongqing", "chongqing"),
-        ("Fujian", "fujian"),
-        ("Gansu", "gansu"),
-        ("Guangdong", "guangdong"),
-        ("Guangxi", "guangxi"),
-        ("Guizhou", "guizhou"),
-        ("Hainan", "hainan"),
-        ("Hebei", "hebei"),
-        ("Heilongjiang", "heilongjiang"),
-        ("Henan", "henan"),
-        ("Hong Kong", "hong-kong"),
-        ("Hubei", "hubei"),
-        ("Hunan", "hunan"),
-        ("Inner Mongolia", "inner-mongolia"),
-        ("Jiangsu", "jiangsu"),
-        ("Jiangxi", "jiangxi"),
-        ("Jilin", "jilin"),
-        ("Liaoning", "liaoning"),
-        ("Macau", "macau"),
-        ("Ningxia", "ningxia"),
-        ("Qinghai", "qinghai"),
-        ("Shaanxi", "shaanxi"),
-        ("Shandong", "shandong"),
-        ("Shanghai", "shanghai"),
-        ("Shanxi", "shanxi"),
-        ("Sichuan", "sichuan"),
-        ("Tianjin", "tianjin"),
-        ("Tibet", "tibet"),
-        ("Xinjiang", "xinjiang"),
-        ("Yunnan", "yunnan"),
-        ("Zhejiang", "zhejiang"),
-    ]),
-    ("East Timor", "east-timor"),
-    ("GCC States", "gcc-states"),
-    ("India", "india", [
-        ("Central Zone", "central-zone"),
-        ("Eastern Zone", "eastern-zone"),
-        ("North-Eastern Zone", "north-eastern-zone"),
-        ("Northern Zone", "northern-zone"),
-        ("Southern Zone", "southern-zone"),
-        ("Western Zone", "western-zone"),
-    ]),
-    ("Indonesia", "indonesia", [
-        ("Java", "java"),
-        ("Kalimantan", "kalimantan"),
-        ("Maluku", "maluku"),
-        ("Nusa-Tenggara", "nusa-tenggara"),
-        ("Papua", "papua"),
-        ("Sulawesi", "sulawesi"),
-        ("Sumatra", "sumatra"),
-    ]),
-    ("Iran", "iran"),
-    ("Iraq", "iraq"),
-    ("Israel and Palestine", "israel-and-palestine"),
-    ("Japan", "japan", [
-        ("Chubu", "chubu"),
-        ("Chugoku", "chugoku"),
-        ("Hokkaido", "hokkaido"),
-        ("Kansai", "kansai"),
-        ("Kanto", "kanto"),
-        ("Kyushu", "kyushu"),
-        ("Shikoku", "shikoku"),
-        ("Tohoku", "tohoku"),
-    ]),
-    ("Jordan", "jordan"),
-    ("Kazakhstan", "kazakhstan"),
-    ("Kyrgyzstan", "kyrgyzstan"),
-    ("Laos", "laos"),
-    ("Lebanon", "lebanon"),
-    ("Malaysia, Singapore, and Brunei", "malaysia-singapore-brunei"),
-    ("Maldives", "maldives"),
-    ("Mongolia", "mongolia"),
-    ("Myanmar", "myanmar"),
-    ("Nepal", "nepal"),
-    ("North Korea", "north-korea"),
-    ("Pakistan", "pakistan"),
-    ("Philippines", "philippines"),
-    ("South Korea", "south-korea"),
-    ("Sri Lanka", "sri-lanka"),
-    ("Syria", "syria"),
-    ("Taiwan", "taiwan"),
-    ("Tajikistan", "tajikistan"),
-    ("Thailand", "thailand"),
-    ("Turkmenistan", "turkmenistan"),
-    ("Uzbekistan", "uzbekistan"),
-    ("Vietnam", "vietnam"),
-    ("Yemen", "yemen"),
-]
 
-AUSTRALIA_OCEANIA = [
-    ("American Oceania", "american-oceania"),
-    ("Australia", "australia"),
-    ("Cook Islands", "cook-islands"),
-    ("Fiji", "fiji"),
-    ("Ile de Clipperton", "ile-de-clipperton"),
-    ("Kiribati", "kiribati"),
-    ("Marshall Islands", "marshall-islands"),
-    ("Micronesia", "micronesia"),
-    ("Nauru", "nauru"),
-    ("New Caledonia", "new-caledonia"),
-    ("New Zealand", "new-zealand"),
-    ("Niue", "niue"),
-    ("Palau", "palau"),
-    ("Papua New Guinea", "papua-new-guinea"),
-    ("Pitcairn Islands", "pitcairn-islands"),
-    ("Polynesie Francaise", "polynesie-francaise"),
-    ("Samoa", "samoa"),
-    ("Solomon Islands", "solomon-islands"),
-    ("Tokelau", "tokelau"),
-    ("Tonga", "tonga"),
-    ("Tuvalu", "tuvalu"),
-    ("Vanuatu", "vanuatu"),
-    ("Wallis et Futuna", "wallis-et-futuna"),
-]
+def slug_to_name(slug):
+    """Convert a URL slug to a display name.
 
-CENTRAL_AMERICA = [
-    ("Bahamas", "bahamas"),
-    ("Belize", "belize"),
-    ("Costa Rica", "costa-rica"),
-    ("Cuba", "cuba"),
-    ("El Salvador", "el-salvador"),
-    ("Guatemala", "guatemala"),
-    ("Haiti and Dominican Republic", "haiti-and-domrep"),
-    ("Honduras", "honduras"),
-    ("Jamaica", "jamaica"),
-    ("Nicaragua", "nicaragua"),
-    ("Panama", "panama"),
-]
-
-EUROPE = [
-    ("Albania", "albania"),
-    ("Alps", "alps"),
-    ("Andorra", "andorra"),
-    ("Austria", "austria"),
-    ("Azores", "azores"),
-    ("Belarus", "belarus"),
-    ("Belgium", "belgium"),
-    ("Bosnia-Herzegovina", "bosnia-herzegovina"),
-    ("Bulgaria", "bulgaria"),
-    ("Croatia", "croatia"),
-    ("Cyprus", "cyprus"),
-    ("Czech Republic", "czech-republic"),
-    ("Denmark", "denmark"),
-    ("Estonia", "estonia"),
-    ("Faroe Islands", "faroe-islands"),
-    ("Finland", "finland"),
-    ("France", "france", [
-        ("Alsace", "alsace"),
-        ("Aquitaine", "aquitaine"),
-        ("Auvergne", "auvergne"),
-        ("Basse-Normandie", "basse-normandie"),
-        ("Bourgogne", "bourgogne"),
-        ("Bretagne", "bretagne"),
-        ("Centre", "centre"),
-        ("Champagne Ardenne", "champagne-ardenne"),
-        ("Corse", "corse"),
-        ("Franche Comte", "franche-comte"),
-        ("Guadeloupe", "guadeloupe"),
-        ("Guyane", "guyane"),
-        ("Haute-Normandie", "haute-normandie"),
-        ("Ile-de-France", "ile-de-france"),
-        ("Languedoc-Roussillon", "languedoc-roussillon"),
-        ("Limousin", "limousin"),
-        ("Lorraine", "lorraine"),
-        ("Martinique", "martinique"),
-        ("Mayotte", "mayotte"),
-        ("Midi-Pyrenees", "midi-pyrenees"),
-        ("Nord-Pas-de-Calais", "nord-pas-de-calais"),
-        ("Pays de la Loire", "pays-de-la-loire"),
-        ("Picardie", "picardie"),
-        ("Poitou-Charentes", "poitou-charentes"),
-        ("Provence Alpes-Cote-d'Azur", "provence-alpes-cote-d-azur"),
-        ("Reunion", "reunion"),
-        ("Rhone-Alpes", "rhone-alpes"),
-    ]),
-    ("Georgia", "georgia"),
-    ("Germany", "germany", [
-        ("Baden-Wuerttemberg", "baden-wuerttemberg"),
-        ("Bayern", "bayern"),
-        ("Berlin", "berlin"),
-        ("Brandenburg", "brandenburg"),
-        ("Bremen", "bremen"),
-        ("Hamburg", "hamburg"),
-        ("Hessen", "hessen"),
-        ("Mecklenburg-Vorpommern", "mecklenburg-vorpommern"),
-        ("Niedersachsen", "niedersachsen"),
-        ("Nordrhein-Westfalen", "nordrhein-westfalen"),
-        ("Rheinland-Pfalz", "rheinland-pfalz"),
-        ("Saarland", "saarland"),
-        ("Sachsen", "sachsen"),
-        ("Sachsen-Anhalt", "sachsen-anhalt"),
-        ("Schleswig-Holstein", "schleswig-holstein"),
-        ("Thueringen", "thueringen"),
-    ]),
-    ("Greece", "greece"),
-    ("Guernsey and Jersey", "guernsey-jersey"),
-    ("Hungary", "hungary"),
-    ("Iceland", "iceland"),
-    ("Ireland and Northern Ireland", "ireland-and-northern-ireland"),
-    ("Isle of Man", "isle-of-man"),
-    ("Italy", "italy", [
-        ("Centro", "centro"),
-        ("Isole", "isole"),
-        ("Nord-Est", "nord-est"),
-        ("Nord-Ovest", "nord-ovest"),
-        ("Sud", "sud"),
-    ]),
-    ("Kosovo", "kosovo"),
-    ("Latvia", "latvia"),
-    ("Liechtenstein", "liechtenstein"),
-    ("Lithuania", "lithuania"),
-    ("Luxembourg", "luxembourg"),
-    ("Macedonia", "macedonia"),
-    ("Malta", "malta"),
-    ("Moldova", "moldova"),
-    ("Monaco", "monaco"),
-    ("Montenegro", "montenegro"),
-    ("Netherlands", "netherlands", [
-        ("Drenthe", "drenthe"),
-        ("Flevoland", "flevoland"),
-        ("Friesland", "friesland"),
-        ("Gelderland", "gelderland"),
-        ("Groningen", "groningen"),
-        ("Limburg", "limburg"),
-        ("Noord-Brabant", "noord-brabant"),
-        ("Noord-Holland", "noord-holland"),
-        ("Overijssel", "overijssel"),
-        ("Utrecht", "utrecht"),
-        ("Zeeland", "zeeland"),
-        ("Zuid-Holland", "zuid-holland"),
-    ]),
-    ("Norway", "norway"),
-    ("Poland", "poland", [
-        ("Dolnoslaskie", "dolnoslaskie"),
-        ("Kujawsko-Pomorskie", "kujawsko-pomorskie"),
-        ("Lodzkie", "lodzkie"),
-        ("Lubelskie", "lubelskie"),
-        ("Lubuskie", "lubuskie"),
-        ("Malopolskie", "malopolskie"),
-        ("Mazowieckie", "mazowieckie"),
-        ("Opolskie", "opolskie"),
-        ("Podkarpackie", "podkarpackie"),
-        ("Podlaskie", "podlaskie"),
-        ("Pomorskie", "pomorskie"),
-        ("Slaskie", "slaskie"),
-        ("Swietokrzyskie", "swietokrzyskie"),
-        ("Warminsko-Mazurskie", "warminsko-mazurskie"),
-        ("Wielkopolskie", "wielkopolskie"),
-        ("Zachodniopomorskie", "zachodniopomorskie"),
-    ]),
-    ("Portugal", "portugal"),
-    ("Romania", "romania"),
-    ("Serbia", "serbia"),
-    ("Slovakia", "slovakia"),
-    ("Slovenia", "slovenia"),
-    ("Spain", "spain", [
-        ("Andalucia", "andalucia"),
-        ("Aragon", "aragon"),
-        ("Asturias", "asturias"),
-        ("Cantabria", "cantabria"),
-        ("Castilla-La Mancha", "castilla-la-mancha"),
-        ("Castilla y Leon", "castilla-y-leon"),
-        ("Cataluna", "cataluna"),
-        ("Ceuta", "ceuta"),
-        ("Extremadura", "extremadura"),
-        ("Galicia", "galicia"),
-        ("Islas Baleares", "islas-baleares"),
-        ("La Rioja", "la-rioja"),
-        ("Madrid", "madrid"),
-        ("Melilla", "melilla"),
-        ("Murcia", "murcia"),
-        ("Navarra", "navarra"),
-        ("Pais Vasco", "pais-vasco"),
-        ("Valencia", "valencia"),
-    ]),
-    ("Sweden", "sweden"),
-    ("Switzerland", "switzerland"),
-    ("Turkey", "turkey"),
-    ("Ukraine", "ukraine"),
-    ("United Kingdom", "united-kingdom", [
-        ("Bermuda", "bermuda"),
-        ("England", "england", [
-            ("Bedfordshire", "bedfordshire"),
-            ("Berkshire", "berkshire"),
-            ("Bristol", "bristol"),
-            ("Buckinghamshire", "buckinghamshire"),
-            ("Cambridgeshire", "cambridgeshire"),
-            ("Cheshire", "cheshire"),
-            ("Cornwall", "cornwall"),
-            ("Cumbria", "cumbria"),
-            ("Derbyshire", "derbyshire"),
-            ("Devon", "devon"),
-            ("Dorset", "dorset"),
-            ("Durham", "durham"),
-            ("East Sussex", "east-sussex"),
-            ("East Yorkshire with Hull", "east-yorkshire-with-hull"),
-            ("Essex", "essex"),
-            ("Gloucestershire", "gloucestershire"),
-            ("Greater London", "greater-london"),
-            ("Greater Manchester", "greater-manchester"),
-            ("Hampshire", "hampshire"),
-            ("Herefordshire", "herefordshire"),
-            ("Hertfordshire", "hertfordshire"),
-            ("Isle of Wight", "isle-of-wight"),
-            ("Kent", "kent"),
-            ("Lancashire", "lancashire"),
-            ("Leicestershire", "leicestershire"),
-            ("Lincolnshire", "lincolnshire"),
-            ("Merseyside", "merseyside"),
-            ("Norfolk", "norfolk"),
-            ("North Yorkshire", "north-yorkshire"),
-            ("Northamptonshire", "northamptonshire"),
-            ("Northumberland", "northumberland"),
-            ("Nottinghamshire", "nottinghamshire"),
-            ("Oxfordshire", "oxfordshire"),
-            ("Rutland", "rutland"),
-            ("Shropshire", "shropshire"),
-            ("Somerset", "somerset"),
-            ("South Yorkshire", "south-yorkshire"),
-            ("Staffordshire", "staffordshire"),
-            ("Suffolk", "suffolk"),
-            ("Surrey", "surrey"),
-            ("Tyne and Wear", "tyne-and-wear"),
-            ("Warwickshire", "warwickshire"),
-            ("West Midlands", "west-midlands"),
-            ("West Sussex", "west-sussex"),
-            ("West Yorkshire", "west-yorkshire"),
-            ("Wiltshire", "wiltshire"),
-            ("Worcestershire", "worcestershire"),
-        ]),
-        ("Falkland Islands", "falklands"),
-        ("Scotland", "scotland"),
-        ("Wales", "wales"),
-    ]),
-]
-
-NORTH_AMERICA = [
-    ("Canada", "canada", [
-        ("Alberta", "alberta"),
-        ("British Columbia", "british-columbia"),
-        ("Manitoba", "manitoba"),
-        ("New Brunswick", "new-brunswick"),
-        ("Newfoundland and Labrador", "newfoundland-and-labrador"),
-        ("Northwest Territories", "northwest-territories"),
-        ("Nova Scotia", "nova-scotia"),
-        ("Nunavut", "nunavut"),
-        ("Ontario", "ontario"),
-        ("Prince Edward Island", "prince-edward-island"),
-        ("Quebec", "quebec"),
-        ("Saskatchewan", "saskatchewan"),
-        ("Yukon", "yukon"),
-    ]),
-    ("Greenland", "greenland"),
-    ("Mexico", "mexico"),
-    ("United States", "us", [
-        ("Alabama", "alabama"),
-        ("Alaska", "alaska"),
-        ("Arizona", "arizona"),
-        ("Arkansas", "arkansas"),
-        ("California", "california"),
-        ("Colorado", "colorado"),
-        ("Connecticut", "connecticut"),
-        ("Delaware", "delaware"),
-        ("District of Columbia", "district-of-columbia"),
-        ("Florida", "florida"),
-        ("Georgia (US State)", "georgia"),
-        ("Hawaii", "hawaii"),
-        ("Idaho", "idaho"),
-        ("Illinois", "illinois"),
-        ("Indiana", "indiana"),
-        ("Iowa", "iowa"),
-        ("Kansas", "kansas"),
-        ("Kentucky", "kentucky"),
-        ("Louisiana", "louisiana"),
-        ("Maine", "maine"),
-        ("Maryland", "maryland"),
-        ("Massachusetts", "massachusetts"),
-        ("Michigan", "michigan"),
-        ("Minnesota", "minnesota"),
-        ("Mississippi", "mississippi"),
-        ("Missouri", "missouri"),
-        ("Montana", "montana"),
-        ("Nebraska", "nebraska"),
-        ("Nevada", "nevada"),
-        ("New Hampshire", "new-hampshire"),
-        ("New Jersey", "new-jersey"),
-        ("New Mexico", "new-mexico"),
-        ("New York", "new-york"),
-        ("North Carolina", "north-carolina"),
-        ("North Dakota", "north-dakota"),
-        ("Ohio", "ohio"),
-        ("Oklahoma", "oklahoma"),
-        ("Oregon", "oregon"),
-        ("Pennsylvania", "pennsylvania"),
-        ("Puerto Rico", "puerto-rico"),
-        ("Rhode Island", "rhode-island"),
-        ("South Carolina", "south-carolina"),
-        ("South Dakota", "south-dakota"),
-        ("Tennessee", "tennessee"),
-        ("Texas", "texas"),
-        ("US Virgin Islands", "us-virgin-islands"),
-        ("Utah", "utah"),
-        ("Vermont", "vermont"),
-        ("Virginia", "virginia"),
-        ("Washington", "washington"),
-        ("West Virginia", "west-virginia"),
-        ("Wisconsin", "wisconsin"),
-        ("Wyoming", "wyoming"),
-    ]),
-]
-
-RUSSIA = [
-    ("Central Federal District", "central-fed-district"),
-    ("Crimean Federal District", "crimean-fed-district"),
-    ("Far Eastern Federal District", "far-eastern-fed-district"),
-    ("Kaliningrad", "kaliningrad"),
-    ("North Caucasus Federal District", "north-caucasus-fed-district"),
-    ("Northwestern Federal District", "northwestern-fed-district"),
-    ("Siberian Federal District", "siberian-fed-district"),
-    ("South Federal District", "south-fed-district"),
-    ("Ural Federal District", "ural-fed-district"),
-    ("Volga Federal District", "volga-fed-district"),
-]
-
-SOUTH_AMERICA = [
-    ("Argentina", "argentina"),
-    ("Bolivia", "bolivia"),
-    ("Brazil", "brazil", [
-        ("Centro-Oeste", "centro-oeste"),
-        ("Nordeste", "nordeste"),
-        ("Norte", "norte"),
-        ("Sudeste", "sudeste"),
-        ("Sul", "sul"),
-    ]),
-    ("Chile", "chile"),
-    ("Colombia", "colombia"),
-    ("Ecuador", "ecuador"),
-    ("Guyana", "guyana"),
-    ("Paraguay", "paraguay"),
-    ("Peru", "peru"),
-    ("Suriname", "suriname"),
-    ("Uruguay", "uruguay"),
-    ("Venezuela", "venezuela"),
-]
-
-# ---------------------------------------------------------------------------
-# Continent definitions
-# ---------------------------------------------------------------------------
-
-CONTINENTS = [
-    {"name": "Africa", "slug": "africa",
-     "toplevel": False, "regions": AFRICA},
-    {"name": "Antarctica", "slug": "antarctica",
-     "toplevel": True, "regions": []},
-    {"name": "Asia", "slug": "asia",
-     "toplevel": False, "regions": ASIA},
-    {"name": "Australia-Oceania", "slug": "australia-oceania",
-     "toplevel": False, "regions": AUSTRALIA_OCEANIA},
-    {"name": "Central America", "slug": "central-america",
-     "toplevel": False, "regions": CENTRAL_AMERICA},
-    {"name": "Europe", "slug": "europe",
-     "toplevel": False, "regions": EUROPE},
-    {"name": "North America", "slug": "north-america",
-     "toplevel": False, "regions": NORTH_AMERICA},
-    {"name": "Russia", "slug": "russia",
-     "toplevel": True, "regions": RUSSIA},
-    {"name": "South America", "slug": "south-america",
-     "toplevel": False, "regions": SOUTH_AMERICA},
-]
+    Uses DISPLAY_NAME_OVERRIDES for known special cases,
+    falls back to titlecase with hyphens replaced by spaces.
+    """
+    if slug in DISPLAY_NAME_OVERRIDES:
+        return DISPLAY_NAME_OVERRIDES[slug]
+    return slug.replace("-", " ").title()
 
 
 def stable_family_id(url_path):
@@ -566,41 +171,38 @@ def stable_family_id(url_path):
     and map into 1-65535. This is stable across additions/removals.
     """
     h = hashlib.sha256(url_path.encode()).digest()
-    # Use first 2 bytes for a 16-bit value, then map to 1-65535
     raw = int.from_bytes(h[:2], "big")
     return (raw % 65535) + 1
 
 
-# ---------------------------------------------------------------------------
-# Profile generation logic
-# ---------------------------------------------------------------------------
+def fetch_index():
+    """Fetch and parse the Geofabrik region index."""
+    with urllib.request.urlopen(GEOFABRIK_INDEX_URL) as resp:
+        return json.loads(resp.read())
 
-def collect_profiles(continent):
-    """Flatten hierarchy into list of (profile_rel_path, url_path, display_name)."""
-    profiles = []
-    name = continent["name"]
-    slug = continent["slug"]
 
-    # Top-level continents (Russia, Antarctica) get their own profile
-    if continent["toplevel"]:
-        profiles.append((f"{name}.conf", slug, name))
+def url_path_from_pbf(pbf_url):
+    """Extract the URL path used for directory structure and FAMILY_ID hashing.
 
-    def walk(regions, dir_prefix, url_prefix):
-        for region in regions:
-            rname = region[0]
-            rslug = region[1]
-            children = region[2] if len(region) > 2 else []
+    e.g. 'https://download.geofabrik.de/europe/alps-latest.osm.pbf'
+      -> 'europe/alps'
+    """
+    path = pbf_url.replace("https://download.geofabrik.de/", "")
+    return path.replace("-latest.osm.pbf", "")
 
-            profile_rel = os.path.join(dir_prefix, f"{rname}.conf")
-            url_path = f"{url_prefix}/{rslug}"
 
-            profiles.append((profile_rel, url_path, rname))
+def url_path_to_profile_path(url_path, display_name):
+    """Convert a URL path to a profile filesystem path.
 
-            if children:
-                walk(children, os.path.join(dir_prefix, rname), url_path)
+    e.g. 'europe/germany/bayern', 'Bayern' -> 'Europe/Germany/Bayern.conf'
+         'north-america/us/california', 'California' -> 'North America/United States/California.conf'
 
-    walk(continent["regions"], name, slug)
-    return profiles
+    Uses the provided display_name for the leaf (last segment) to handle
+    overrides like 'Georgia (US State)'.
+    """
+    parts = url_path.split("/")
+    dir_parts = [slug_to_name(p) for p in parts[:-1]]
+    return os.path.join(*dir_parts, f"{display_name}.conf") if dir_parts else f"{display_name}.conf"
 
 
 def write_profile(path, region_name, osm_url, family_id):
@@ -615,6 +217,9 @@ def write_profile(path, region_name, osm_url, family_id):
 
 
 def main():
+    print("Fetching Geofabrik region index...")
+    index_data = fetch_index()
+
     # Clean and recreate profiles directory
     if os.path.exists(PROFILES_DIR):
         shutil.rmtree(PROFILES_DIR)
@@ -623,27 +228,45 @@ def main():
     all_family_ids = {}
     total = 0
 
-    for continent in CONTINENTS:
-        profiles = collect_profiles(continent)
+    for feature in sorted(index_data["features"],
+                          key=lambda f: f["properties"]["id"]):
+        props = feature["properties"]
+        region_id = props["id"]
+        pbf_url = props.get("urls", {}).get("pbf")
 
-        for rel_path, url_path, display_name in profiles:
-            family_id = stable_family_id(url_path)
+        if not pbf_url:
+            continue
 
-            # Handle hash collisions by linear probing
-            while family_id in all_family_ids:
-                print(
-                    f"WARNING: FAMILY_ID {family_id} collision between "
-                    f"{rel_path} and {all_family_ids[family_id]}, rehashing",
-                    file=sys.stderr,
-                )
-                family_id = (family_id % 65535) + 1
-            all_family_ids[family_id] = rel_path
+        url_path = url_path_from_pbf(pbf_url)
+        slug = url_path.split("/")[-1]
 
-            osm_url = f"{BASE_URL}/{url_path}-latest.osm.pbf"
-            full_path = os.path.join(PROFILES_DIR, rel_path)
+        # Skip large continent-level extracts
+        if region_id in SKIP_CONTINENTS:
+            continue
 
-            write_profile(full_path, display_name, osm_url, family_id)
-            total += 1
+        # For the display name, check overrides by region_id first (e.g.
+        # "us/georgia" -> "Georgia (US State)"), then fall back to slug
+        if region_id in DISPLAY_NAME_OVERRIDES:
+            display_name = DISPLAY_NAME_OVERRIDES[region_id]
+        else:
+            display_name = slug_to_name(slug)
+        rel_path = url_path_to_profile_path(url_path, display_name)
+
+        family_id = stable_family_id(url_path)
+
+        # Handle hash collisions by linear probing
+        while family_id in all_family_ids:
+            print(
+                f"WARNING: FAMILY_ID {family_id} collision between "
+                f"{rel_path} and {all_family_ids[family_id]}, rehashing",
+                file=sys.stderr,
+            )
+            family_id = (family_id % 65535) + 1
+        all_family_ids[family_id] = rel_path
+
+        full_path = os.path.join(PROFILES_DIR, rel_path)
+        write_profile(full_path, display_name, pbf_url, family_id)
+        total += 1
 
     print(f"Generated {total} profiles under {PROFILES_DIR}/")
 
