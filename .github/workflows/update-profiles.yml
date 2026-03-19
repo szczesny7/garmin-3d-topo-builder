@@ -1,0 +1,48 @@
+name: Update Geofabrik profiles
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-profiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate profiles
+        run: python3 generate_profiles.py
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet profiles/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: auto/update-profiles
+          commit-message: "Update Geofabrik region profiles"
+          title: "Update Geofabrik region profiles"
+          body: |
+            Automated weekly regeneration of profiles from `generate_profiles.py`.
+
+            This PR was created because the Geofabrik hierarchy has changed (regions added, removed, or renamed).
+
+            Review the diff to see what changed, then merge if everything looks correct.
+          labels: automated
+          delete-branch: true
