@@ -32,15 +32,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y osmium-tool wget unzip
 
-      - name: Create .env for Earthdata credentials
+      - name: Run full build (Monaco)
         env:
           EARTHDATA_USERNAME: ${{ secrets.EARTHDATA_USERNAME }}
           EARTHDATA_PASSWORD: ${{ secrets.EARTHDATA_PASSWORD }}
-        run: |
-          echo "EARTHDATA_USERNAME=${EARTHDATA_USERNAME}" > .env
-          echo "EARTHDATA_PASSWORD=${EARTHDATA_PASSWORD}" >> .env
-
-      - name: Run full build (Monaco)
         run: ./update_map.sh profiles/Europe/Monaco.conf
 
       - name: Verify output files exist
